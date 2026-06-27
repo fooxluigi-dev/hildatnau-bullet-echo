@@ -1250,12 +1250,23 @@ function gameOver() {
   overlay.classList.add("show");
 }
 
+// Detect touch device (global, used by showMenu and render)
+const isTouchDevice = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0);
+
 function showMenu() {
   gameState = "menu";
   const mode = applyDailyMode(todaySeed());
   oMode.textContent = mode.name.toUpperCase();
   oTitle.textContent = "Bullet Echo";
-  oMsg.textContent = `${mode.desc} Move WASD/arrows, mouse to aim, click/space to shoot. Hold Q to charge ability.`;
+  // Touch-aware instructions (isTouchDevice is declared above)
+  const hintEl = document.getElementById("hint");
+  if (isTouchDevice) {
+    oMsg.textContent = `${mode.desc} Use the left stick to move, the right stick to aim and shoot.`;
+    if (hintEl) hintEl.innerHTML = '<b>Left stick</b> move · <b>Right stick</b> aim + fire · <b>Double-tap with 2 fingers</b> ability';
+  } else {
+    oMsg.textContent = `${mode.desc} Move WASD/arrows, mouse to aim, click/space to shoot. Hold Q to charge ability.`;
+    if (hintEl) hintEl.innerHTML = '<b>WASD</b> move · <b>Mouse</b> aim · <b>Click/Space</b> shoot · <b>Q</b> ability';
+  }
   oBtn.textContent = "Start";
   overlay.classList.add("show");
 }
@@ -1303,15 +1314,6 @@ function loop(now) {
 }
 
 /* ---------- Boot ---------- */
-
-// Detect touch device and update instructions dynamically
-const isTouchDevice = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0);
-if (isTouchDevice) {
-  document.getElementById("hint").innerHTML =
-    '<b>Left stick</b> move · <b>Right stick</b> aim + fire · <b>Double-tap with 2 fingers</b> ability';
-  document.getElementById("o-msg").textContent =
-    `${dailyMode.desc} Use the left stick to move, the right stick to aim and shoot.`;
-}
 
 /* ---------- Boot ---------- */
 
