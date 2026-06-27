@@ -2,13 +2,24 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#050507">
 <title>Bullet Echo · Hildatnau</title>
 <meta name="description" content="Top-down twin-stick shooter. Vanilla JS, zero deps, built in one evening.">
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --safe-top: env(safe-area-inset-top, 0px);
+    --safe-bottom: env(safe-area-inset-bottom, 0px);
+    --safe-left: env(safe-area-inset-left, 0px);
+    --safe-right: env(safe-area-inset-right, 0px);
+  }
   html, body {
     height: 100%;
+    height: 100dvh;
     background: #050507;
     color: #e8e8ea;
     font-family: ui-monospace, "SF Mono", Menlo, monospace;
@@ -16,6 +27,8 @@
     -webkit-font-smoothing: antialiased;
     user-select: none;
     touch-action: none;
+    -webkit-user-select: none;
+    -webkit-tap-highlight-color: transparent;
   }
   body {
     display: flex;
@@ -23,6 +36,11 @@
     align-items: center;
     justify-content: center;
     background: radial-gradient(ellipse at center, #0c0c12 0%, #050507 70%);
+    padding-top: var(--safe-top);
+    padding-bottom: var(--safe-bottom);
+    padding-left: var(--safe-left);
+    padding-right: var(--safe-right);
+    overscroll-behavior: none;
   }
   #stage {
     position: relative;
@@ -31,8 +49,31 @@
     border-radius: 6px;
     box-shadow: 0 0 80px rgba(255, 80, 60, 0.08), inset 0 0 40px rgba(0,0,0,0.5);
     cursor: crosshair;
+    touch-action: none;
+    /* Responsive square using padding-bottom trick (aspect-ratio has poor headless support) */
+    width: min(
+      calc(100vw - var(--safe-left) - var(--safe-right) - 16px),
+      calc(100dvh - var(--safe-top) - var(--safe-bottom) - 120px),
+      720px
+    );
+    flex-shrink: 0;
   }
-  canvas { display: block; border-radius: 6px; }
+  #stage::before {
+    content: "";
+    display: block;
+    padding-top: 100%; /* 1:1 aspect ratio */
+  }
+  /* Inner canvas fills the stage absolutely */
+  canvas {
+    display: block;
+    border-radius: 6px;
+    touch-action: none;
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+  }
   #hud {
     display: grid;
     grid-template-columns: 1fr 1fr 1fr;
@@ -41,6 +82,7 @@
     width: 100%;
     max-width: 720px;
     padding: 0 8px;
+    flex-shrink: 0;
   }
   .stat {
     background: #111116;
@@ -147,9 +189,27 @@
   }
   #flash.on { opacity: 1; transition: opacity 0.05s; }
   @media (max-width: 720px) {
-    #stage { width: 100%; max-width: 100vw; }
-    #hud { grid-template-columns: 1fr 1fr 1fr; }
+    body { padding: 4px; }
+    #stage { max-width: 100%; }
+    #hud { grid-template-columns: 1fr 1fr 1fr; gap: 6px; margin-top: 6px; padding: 0 2px; }
+    .stat { padding: 4px 6px; }
+    .stat .label { font-size: 8px; margin-bottom: 2px; letter-spacing: 0.05em; }
+    .stat .value { font-size: 14px; }
+    .bar { height: 3px; margin-top: 2px; }
+    .small, #kills-sub, #wave-sub { display: none; }
     #hint { display: none; }
+    #stage { border-radius: 4px; }
+    canvas { border-radius: 4px; }
+    #overlay h1 { font-size: 22px; }
+    #overlay .sub { font-size: 10px; }
+    #overlay p { font-size: 10px; max-width: 260px; }
+    #overlay .btn { padding: 8px 18px; font-size: 10px; }
+  }
+  @media (max-height: 500px) and (orientation: landscape) {
+    /* Landscape phone: hide HUD, make stage fill */
+    #hud { display: none; }
+    body { padding: 0; }
+    #stage { max-height: 100dvh; }
   }
 </style>
 </head>
@@ -187,7 +247,6 @@
 <div id="hint">
   <b>WASD</b> or <b>arrows</b> move · <b>Mouse</b> aim · <b>Click/space</b> shoot · <b>Q</b> hold ability · <b>R</b> restart
 </div>
-
 <script>
 "use strict";
 
@@ -481,23 +540,50 @@ canvas.addEventListener("mousedown", (e) => { mouseDown = true; e.preventDefault
 canvas.addEventListener("mouseup", () => { mouseDown = false; });
 canvas.addEventListener("contextmenu", (e) => e.preventDefault());
 
-// Touch: virtual twin sticks
+// Touch: virtual twin sticks (mobile-optimized, less sensitive)
 let leftTouch = null, rightTouch = null;
 let touchMoveVec = { x: 0, y: 0 };
 let touchAimVec = { x: 0, y: 0 };
+let touchShooting = false;
+
+// Tunables — these are key to "less sensitive" feel
+const STICK_DEADZONE = 28;        // px: below this, stick outputs 0
+const STICK_MAX_RADIUS = 110;     // px: beyond this, stick outputs full
+const STICK_SOFT_RAMP = 0.35;     // 0=hard deadzone, 1=linear (smooth curve in between)
+const STICK_SHOOT_THRESHOLD = 50; // px: beyond this distance on right stick, auto-fire
+
+// Helper: convert stick offset → normalized -1..1 vector with soft ramp + dead zone
+function stickVector(dx, dy) {
+  const dist = Math.hypot(dx, dy);
+  if (dist < STICK_DEADZONE) return { x: 0, y: 0 };
+  // Soft ramp: smooth curve from deadzone to max radius
+  // t goes from 0 at deadzone to 1 at max radius
+  const t = Math.min(1, (dist - STICK_DEADZONE) / (STICK_MAX_RADIUS - STICK_DEADZONE));
+  // Apply smooth curve (cubic ease) — feels less jerky than linear
+  const eased = STICK_SOFT_RAMP * t + (1 - STICK_SOFT_RAMP) * (t * t * (3 - 2 * t));
+  const angle = Math.atan2(dy, dx);
+  return {
+    x: Math.cos(angle) * eased,
+    y: Math.sin(angle) * eased,
+    magnitude: dist,
+  };
+}
 
 canvas.addEventListener("touchstart", (e) => {
   e.preventDefault();
   for (const t of e.changedTouches) {
     const rect = canvas.getBoundingClientRect();
-    const x = t.clientX - rect.left;
-    const y = t.clientY - rect.top;
-    const side = x < rect.width / 2 ? "left" : "right";
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    const x = (t.clientX - rect.left) * scaleX;
+    const y = (t.clientY - rect.top) * scaleY;
+    // Split by x-position in CANVAS coordinates (not screen) so it works regardless of CSS scaling
+    const side = x < canvas.width / 2 ? "left" : "right";
     if (side === "left") {
-      leftTouch = { id: t.identifier, x, y, startX: x, startY: y };
+      leftTouch = { id: t.identifier, startCanvasX: x, startCanvasY: y, currentCanvasX: x, currentCanvasY: y };
     } else {
-      rightTouch = { id: t.identifier, x, y, startX: x, startY: y };
-      mouseDown = true;
+      rightTouch = { id: t.identifier, startCanvasX: x, startCanvasY: y, currentCanvasX: x, currentCanvasY: y };
+      touchShooting = true;
     }
   }
 }, { passive: false });
@@ -506,34 +592,28 @@ canvas.addEventListener("touchmove", (e) => {
   e.preventDefault();
   for (const t of e.changedTouches) {
     const rect = canvas.getBoundingClientRect();
-    const x = t.clientX - rect.left;
-    const y = t.clientY - rect.top;
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    const x = (t.clientX - rect.left) * scaleX;
+    const y = (t.clientY - rect.top) * scaleY;
     if (leftTouch && t.identifier === leftTouch.id) {
-      const dx = x - leftTouch.startX;
-      const dy = y - leftTouch.startY;
-      const len = Math.hypot(dx, dy);
-      const maxLen = 60;
-      if (len > maxLen) {
-        touchMoveVec.x = dx / len;
-        touchMoveVec.y = dy / len;
-      } else if (len > 8) {
-        touchMoveVec.x = dx / maxLen;
-        touchMoveVec.y = dy / maxLen;
-      } else {
-        touchMoveVec.x = 0;
-        touchMoveVec.y = 0;
-      }
+      leftTouch.currentCanvasX = x;
+      leftTouch.currentCanvasY = y;
+      const dx = x - leftTouch.startCanvasX;
+      const dy = y - leftTouch.startCanvasY;
+      const v = stickVector(dx, dy);
+      touchMoveVec.x = v.x;
+      touchMoveVec.y = v.y;
     } else if (rightTouch && t.identifier === rightTouch.id) {
-      const dx = x - rightTouch.startX;
-      const dy = y - rightTouch.startY;
-      const len = Math.hypot(dx, dy);
-      if (len > 8) {
-        touchAimVec.x = dx / len;
-        touchAimVec.y = dy / len;
-      } else {
-        touchAimVec.x = 0;
-        touchAimVec.y = 0;
-      }
+      rightTouch.currentCanvasX = x;
+      rightTouch.currentCanvasY = y;
+      const dx = x - rightTouch.startCanvasX;
+      const dy = y - rightTouch.startCanvasY;
+      const v = stickVector(dx, dy);
+      touchAimVec.x = v.x;
+      touchAimVec.y = v.y;
+      // Auto-fire when stick pushed beyond threshold
+      touchShooting = v.magnitude > STICK_SHOOT_THRESHOLD;
     }
   }
 }, { passive: false });
@@ -549,10 +629,28 @@ canvas.addEventListener("touchend", (e) => {
       rightTouch = null;
       touchAimVec.x = 0;
       touchAimVec.y = 0;
+      touchShooting = false;
       mouseDown = false;
     }
   }
 }, { passive: false });
+
+canvas.addEventListener("touchcancel", (e) => {
+  // Treat like touchend
+  for (const t of e.changedTouches) {
+    if (leftTouch && t.identifier === leftTouch.id) {
+      leftTouch = null;
+      touchMoveVec.x = 0;
+      touchMoveVec.y = 0;
+    } else if (rightTouch && t.identifier === rightTouch.id) {
+      rightTouch = null;
+      touchAimVec.x = 0;
+      touchAimVec.y = 0;
+      touchShooting = false;
+      mouseDown = false;
+    }
+  }
+});
 
 /* ---------- Collisions ---------- */
 
@@ -773,8 +871,9 @@ function updatePlayer(dt) {
   player.fireCooldown -= dt;
   player.iFrames = Math.max(0, player.iFrames - dt);
 
-  // Shooting
-  if (mouseDown && player.fireCooldown <= 0) {
+  // Shooting — touch OR mouse
+  const shooting = mouseDown || touchShooting;
+  if (shooting && player.fireCooldown <= 0) {
     player.fireCooldown = player.fireRate;
     spawnBullet(player.x + Math.cos(player.angle) * 20, player.y + Math.sin(player.angle) * 20,
                 player.angle, player.bulletSpeed, player.bulletDmg, "player");
@@ -1013,28 +1112,79 @@ function render() {
   }
   ctx.globalAlpha = 1;
 
-  // Touch sticks visualization
+  // Touch sticks visualization (always show on touch, with deadzone + max radius)
+  // On touch devices, also show hint zones when not touching
+  if (isTouchDevice && !leftTouch && !rightTouch && gameState === "playing") {
+    // Left zone hint
+    ctx.strokeStyle = "rgba(120,80,255,0.12)";
+    ctx.setLineDash([6, 8]);
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(canvas.width * 0.25, canvas.height * 0.75, STICK_MAX_RADIUS, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(canvas.width * 0.75, canvas.height * 0.75, STICK_MAX_RADIUS, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    // Labels
+    ctx.fillStyle = "rgba(120,80,255,0.4)";
+    ctx.font = "bold 14px ui-monospace, monospace";
+    ctx.textAlign = "center";
+    ctx.fillText("MOVE", canvas.width * 0.25, canvas.height * 0.75 + 5);
+    ctx.fillStyle = "rgba(255,80,64,0.4)";
+    ctx.fillText("AIM", canvas.width * 0.75, canvas.height * 0.75 + 5);
+    ctx.textAlign = "start";
+  }
+
   if (leftTouch) {
-    ctx.strokeStyle = "rgba(120,80,255,0.3)";
+    const sx = leftTouch.startCanvasX, sy = leftTouch.startCanvasY;
+    const cx = leftTouch.currentCanvasX, cy = leftTouch.currentCanvasY;
+    // Outer ring (max radius)
+    ctx.strokeStyle = "rgba(120,80,255,0.25)";
     ctx.lineWidth = 2;
     ctx.beginPath();
-    ctx.arc(leftTouch.startX, leftTouch.startY, 60, 0, Math.PI * 2);
+    ctx.arc(sx, sy, STICK_MAX_RADIUS, 0, Math.PI * 2);
     ctx.stroke();
-    ctx.fillStyle = "rgba(120,80,255,0.3)";
+    // Inner ring (deadzone)
+    ctx.strokeStyle = "rgba(120,80,255,0.15)";
+    ctx.setLineDash([4, 4]);
     ctx.beginPath();
-    ctx.arc(leftTouch.x, leftTouch.y, 20, 0, Math.PI * 2);
+    ctx.arc(sx, sy, STICK_DEADZONE, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    // Stick handle
+    ctx.fillStyle = "rgba(120,80,255,0.4)";
+    ctx.beginPath();
+    ctx.arc(cx, cy, 28, 0, Math.PI * 2);
     ctx.fill();
+    ctx.strokeStyle = "rgba(180,140,255,0.6)";
+    ctx.lineWidth = 2;
+    ctx.stroke();
   }
   if (rightTouch) {
-    ctx.strokeStyle = "rgba(255,80,64,0.3)";
+    const sx = rightTouch.startCanvasX, sy = rightTouch.startCanvasY;
+    const cx = rightTouch.currentCanvasX, cy = rightTouch.currentCanvasY;
+    // Outer ring (max radius)
+    ctx.strokeStyle = "rgba(255,80,64,0.25)";
     ctx.lineWidth = 2;
     ctx.beginPath();
-    ctx.arc(rightTouch.startX, rightTouch.startY, 60, 0, Math.PI * 2);
+    ctx.arc(sx, sy, STICK_MAX_RADIUS, 0, Math.PI * 2);
     ctx.stroke();
-    ctx.fillStyle = "rgba(255,80,64,0.3)";
+    // Inner ring (deadzone)
+    ctx.strokeStyle = "rgba(255,80,64,0.15)";
+    ctx.setLineDash([4, 4]);
     ctx.beginPath();
-    ctx.arc(rightTouch.x, rightTouch.y, 20, 0, Math.PI * 2);
+    ctx.arc(sx, sy, STICK_DEADZONE, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    // Stick handle
+    ctx.fillStyle = touchShooting ? "rgba(255,160,64,0.6)" : "rgba(255,80,64,0.4)";
+    ctx.beginPath();
+    ctx.arc(cx, cy, 28, 0, Math.PI * 2);
     ctx.fill();
+    ctx.strokeStyle = touchShooting ? "rgba(255,200,128,0.8)" : "rgba(255,160,140,0.6)";
+    ctx.lineWidth = 2;
+    ctx.stroke();
   }
 
   // Crosshair
@@ -1114,6 +1264,24 @@ oBtn.addEventListener("click", () => {
   startGame();
 });
 
+// Auto-pause when tab/app goes to background (mobile-friendly)
+let pausedBeforeHide = false;
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden && gameState === "playing") {
+    pausedBeforeHide = true;
+    gameState = "paused";
+  } else if (!document.hidden && pausedBeforeHide && gameState === "paused") {
+    pausedBeforeHide = false;
+    gameState = "playing";
+  }
+});
+
+// Prevent default touch behaviors (pinch-zoom, double-tap zoom, etc.)
+document.addEventListener("gesturestart", (e) => e.preventDefault());
+document.addEventListener("touchmove", (e) => {
+  if (e.touches.length > 1) e.preventDefault();
+}, { passive: false });
+
 /* ---------- Main Loop ---------- */
 
 function loop(now) {
@@ -1136,9 +1304,29 @@ function loop(now) {
 
 /* ---------- Boot ---------- */
 
+// Detect touch device and update instructions dynamically
+const isTouchDevice = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0);
+if (isTouchDevice) {
+  document.getElementById("hint").innerHTML =
+    '<b>Left stick</b> move · <b>Right stick</b> aim + fire · <b>Double-tap with 2 fingers</b> ability';
+  document.getElementById("o-msg").textContent =
+    `${dailyMode.desc} Use the left stick to move, the right stick to aim and shoot.`;
+}
+
+/* ---------- Boot ---------- */
+
+// Responsive canvas sizing — handled via CSS aspect-ratio on parent.
+// Internal canvas resolution stays at 720x720; CSS scales it visually.
+// Touch coordinates are translated from screen → canvas space using rect scaling.
+
 showMenu();
 lastTime = performance.now();
 requestAnimationFrame(loop);
+
+// Canvas is rendered at fixed 720x720 internal resolution (square for proper top-down).
+// CSS scales it to fit the viewport while maintaining aspect ratio.
+// The stage wrapper handles this — canvas is touch-action: none, viewport-fit: cover, etc.
+// No dynamic resize needed since coordinates are all in canvas-space.
 </script>
 </body>
 </html>

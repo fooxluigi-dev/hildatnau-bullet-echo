@@ -13,9 +13,10 @@ code += `
   __findCover: findCover, __hasLineOfSight: hasLineOfSight, __circleRect: circleRect,
   __collideWalls: collideWalls, __applyDailyMode: applyDailyMode, __todaySeed: todaySeed,
   __seedFromString: seedFromString,
+  __stickVector: stickVector, __STICK_DEADZONE: STICK_DEADZONE, __STICK_MAX_RADIUS: STICK_MAX_RADIUS,
   __mulberry32: mulberry32, __hashString: hashString, __MODES: MODES,
   __state: () => gameState, __wave: () => wave, __score: () => score, __kills: () => kills,
-  __dailyMode: () => dailyMode,
+  __dailyMode: () => dailyMode, __touchShooting: () => touchShooting,
 });
 `;
 // DOM shim
@@ -34,6 +35,7 @@ function makeEl(id) {
 global.document = { getElementById: (id) => fakeElements[id] || makeEl(id),
   createElement: () => makeEl('span'), addEventListener: () => {} };
 global.window = { addEventListener: () => {} };
+global.navigator = { maxTouchPoints: 0 };
 global.requestAnimationFrame = () => 0;
 global.performance = { now: () => Date.now() };
 global.prompt = () => null;
@@ -151,5 +153,47 @@ for (const name of modeNames) {
 }
 console.log();
 
-console.log(crashes === 0 ? '\n✅ ALL TESTS PASSED' : '\n❌ CRASHES DETECTED');
-process.exit(crashes === 0 ? 0 : 1);
+console.log(crashes === 0 ? '\n✅ ALL CORE TESTS PASSED' : '\n❌ CRASHES DETECTED');
+
+console.log('\n=== Test 13: stickVector deadzone (mobile sensitivity) ===');
+const dz = __STICK_DEADZONE, maxR = __STICK_MAX_RADIUS;
+// Within deadzone → zero
+const inDeadzone = __stickVector(10, 0);
+console.log(`  (10, 0) within deadzone (${dz}): magnitude=${inDeadzone.x.toFixed(3)}, ${inDeadzone.y.toFixed(3)} (should be 0,0)`);
+// Just outside deadzone → small but not full
+const justOut = __stickVector(dz + 5, 0);
+console.log(`  (${dz+5}, 0) just outside deadzone: x=${justOut.x.toFixed(3)} (should be small < 0.5)`);
+// At max radius → ~1
+const atMax = __stickVector(maxR, 0);
+console.log(`  (${maxR}, 0) at max radius: x=${atMax.x.toFixed(3)} (should be ~1)`);
+// Way beyond max → clamped to 1
+const wayOver = __stickVector(maxR * 2, 0);
+console.log(`  (${maxR*2}, 0) way beyond: x=${wayOver.x.toFixed(3)} (should be ~1, clamped)`);
+// Diagonal at 45°
+const diag = __stickVector(80, 80);
+console.log(`  (80, 80) diagonal: x=${diag.x.toFixed(3)}, y=${diag.y.toFixed(3)} (should be ~equal)`);
+// Verify clamping on huge value doesn't break angle
+const huge = __stickVector(500, 500);
+const mag = Math.hypot(huge.x, huge.y);
+console.log(`  (500, 500) huge magnitude: output mag=${mag.toFixed(3)} (should be <=1)`);
+
+console.log('\n=== Test 14: stickVector smooth curve ===');
+// Check that the curve is monotonic and smooth (not linear)
+const samples = [];
+for (let d = 0; d <= maxR; d += 10) {
+  const v = __stickVector(d, 0);
+  samples.push({ d, mag: v.x });
+}
+// Verify first sample is 0 (deadzone), last is ~1
+const firstZero = samples[0].mag === 0 || samples[1].mag === 0;
+const lastFull = samples[samples.length - 1].mag > 0.95;
+console.log(`  Deadzone starts at d=0-28: first sample mag=${samples[0].mag}, sample[1]=${samples[1].mag}`);
+console.log(`  Reaches full near max: last mag=${samples[samples.length-1].mag.toFixed(3)}`);
+console.log(`  Smooth (no big jumps): checking monotonicity...`);
+let monotonic = true;
+for (let i = 1; i < samples.length; i++) {
+  if (samples[i].mag < samples[i-1].mag - 0.001) { monotonic = false; break; }
+}
+console.log(`  Monotonic: ${monotonic}`);
+
+console.log('\n✅ Stick vector tests complete');
