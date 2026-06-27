@@ -318,7 +318,7 @@ const MODES = [
     id: "glass",
     name: "Glass Cannon",
     desc: "One bullet kills them. One bullet kills you. No health regen.",
-    mods: { playerDmg: 999, enemyDmg: 999, playerMaxHp: 1 },
+    mods: { playerDmg: 999, enemyDmg: 999, playerMaxHp: { abs: 1 } },
   },
   {
     id: "slowmo",
@@ -384,13 +384,23 @@ function seedFromString(s) {
 
 function modValue(base, modKey, fallback) {
   if (dailyMode && dailyMode.mods && dailyMode.mods[modKey] !== undefined) {
-    const v = dailyMode.mods[modKey];
-    // If value is <= 10, treat as absolute (override)
-    // If value > 10, treat as multiplier
-    if (typeof v === 'number' && v <= 10 && v >= 0.5) {
-      return v; // absolute small value (e.g. 1 HP)
+    const entry = dailyMode.mods[modKey];
+    // Convention:
+    //   entry is a number >= 50       → absolute (e.g. 999 damage, 100 HP override)
+    //   entry is a number < 50        → multiplier (e.g. 0.6×, 1.6×, 2.0×)
+    //   entry is { abs: N }           → absolute N (explicit override, any size)
+    //   entry is { mult: N }          → multiplier N (explicit)
+    // The number form handles 99% of cases; the object form is the
+    // escape hatch for absolute values that look like small multipliers
+    // (e.g. Glass Cannon's playerMaxHp: 1 must mean "1 HP", not "×1").
+    if (typeof entry === 'object' && entry !== null) {
+      if ('abs' in entry) return entry.abs;
+      if ('mult' in entry) return base * entry.mult;
     }
-    return base * v;
+    if (typeof entry === 'number' && entry >= 50) {
+      return entry; // absolute large value
+    }
+    return base * entry; // multiplier (default for numbers)
   }
   return fallback !== undefined ? fallback : base;
 }
@@ -466,8 +476,8 @@ function spawnEnemy() {
     maxHp: baseHp * (dailyMode?.mods?.enemyHp ?? 1),
     speed: modValue(70 + wave * 4, "enemySpeed", 70 + wave * 4),
     fireCooldown: 0,
-    fireRate: modValue(Math.max(0.6, 2.2 - wave * 0.1), "enemyFireRate", Math.max(0.6, 2.2 - wave * 0.1)),
-    bulletDmg: modValue(8 + wave * 0.5, "enemyDmg", 8 + wave * 0.5),
+    fireRate: modValue(Math.max(0.7, 2.5 - wave * 0.08), "enemyFireRate", Math.max(0.7, 2.5 - wave * 0.08)),
+    bulletDmg: modValue(6 + wave * 0.4, "enemyDmg", 6 + wave * 0.4),
     bulletSpeed: 240 + wave * 6,
     state: "patrol", // 'patrol'|'chase'|'cover'
     target: null,
@@ -961,7 +971,7 @@ function killEnemy(idx) {
 function damagePlayer(dmg) {
   player.hp -= dmg;
   flashPulse();
-  player.iFrames = 0.5;
+  player.iFrames = 0.7;
   if (player.hp <= 0) {
     gameOver();
   }
